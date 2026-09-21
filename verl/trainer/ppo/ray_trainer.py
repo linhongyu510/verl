@@ -105,8 +105,18 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
     token_level_rewards = token_level_scores - beta * kld
 
-    current_kl = masked_mean(kld, mask=response_mask, axis=-1)  # average over sequence
-    current_kl = torch.mean(current_kl, dim=0).item()
+    # Average over sequence, then over sequences. Aborted rollouts have an all-zero
+    # response mask, and `masked_mean` yields 0 for them, so averaging over every row
+    # would count them as "zero KL" and pull `current_kl` below its true value. That
+    # biases the adaptive controller into lowering beta exactly when aborts are common.
+    # `agg_loss`'s seq-mean modes and `rollout_corr_helper` exclude these rows too.
+    seq_kl = masked_mean(kld, mask=response_mask, axis=-1)
+    seq_is_valid = response_mask.sum(dim=-1) > 0
+    if seq_is_valid.any():
+        current_kl = seq_kl[seq_is_valid].mean().item()
+    else:
+        # Every rollout in the batch was aborted; there is no KL to report.
+        current_kl = 0.0
 
     # according to https://github.com/huggingface/trl/blob/951ca1841f29114b969b57b26c7d3e80a39f75a0/trl/trainer/ppo_trainer.py#L837
     kl_ctrl.update(current_kl=current_kl, n_steps=batch_size)
